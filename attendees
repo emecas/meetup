@@ -1,0 +1,252 @@
+#!/bin/bash
+#
+#  20110113 Initial version
+#
+#  Description:
+#     Use the Meetup API to retrieve attendees for the next event
+#  Usage:
+#     attendees Group APIKey [OutputFile] [Domain]
+#     The APIKey needs to be obtained from Meetups website
+#  Dependencies:
+#     The css file meetup.css should be in the OutputFile directory
+#  Features:
+#  Bug:
+#  Future:
+#
+
+
+GROUP=$1
+#GROUP=NYopenCoffee
+APIKEY=$2
+#GROUP=9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f
+OUTFINAL=$3
+if [[ $OUTFINAL == "" ]]; then
+    OUTFINAL=/home/${USER}/public_html/attendees${GROUP}.html
+fi
+DOMAIN=$4
+#DOMAIN="NYopenCoffee"
+
+if [[ $GROUP == "" ]]; then
+    echo "No group specified"
+    exit -1
+fi
+
+TMPDIR=/var/tmp
+LOGFILE=${TMPDIR}/attendees.log
+
+GREP=/bin/grep     # Ubuntu
+if [[ !(-x ${GREP}) ]]; then
+   GREP=/usr/bin/grep # Mac
+   if [[ !(-x ${GREP}) ]]; then
+       GREP=grep
+   fi
+fi
+
+WGET=/usr/bin/wget  # Ubuntu
+WGET_OUT="-O"
+WGET_ERROR="-o ${LOGFILE}"
+# Curl doesn't generate a log file with the error codes we need but we run without
+CURL=/usr/bin/curl  # Mac and Ubuntu
+CURL_OUT="-o"
+CURL_ERROR="-s"
+RETRIEVE=${WGET}
+RETRIEVE_OUT="${WGET_OUT}"
+RETRIEVE_ERROR="${WGET_ERROR}"
+if [[ !(-x ${RETRIEVE}) ]]; then
+    RETRIEVE=${CURL}
+    RETRIEVE_OUT="${CURL_OUT}"
+    RETRIEVE_ERROR="${CURL_ERROR}"
+fi
+
+if [[ $TZ == "" ]]; then
+    TZ='America/New_York'; export TZ
+fi
+DAYNUMBER=$(date +%u)
+
+OUTTMP=${TMPDIR}/attendees${GROUP}
+
+cat > ${OUTTMP} <<EOF
+<?xml version="1.0" encoding="UTF-8" ?>
+<html>
+<head>
+<title>Attendees</title>
+<link rel="stylesheet" media="all" href="meetup.css" type="text/css"/>
+<meta http-equiv="refresh" content="3600">
+</head>
+<body>
+EOF
+
+#echo As of: $(date +"%H:%M %Z") >> ${OUTTMP}
+
+# Read the first entry from the calendar list
+URL=http://api.meetup.com/events.xml?group_urlname=${GROUP}\&key=${APIKEY}
+GROUPFILE=${TMPDIR}/readMeetupEvents
+${RETRIEVE} ${RETRIEVE_OUT} ${GROUPFILE} ${RETRIEVE_ERROR} $URL
+if [[ -f ${LOGFILE} ]]; then
+    ERROR=$(/bin/grep HTTP ${LOGFILE} | grep -v 200 | /usr/bin/tr -d " ,.[A-Z][a-z]")
+    if [[ -n $ERROR ]]; then
+        echo Something went wrong finding the events for $GROUP
+        echo Using the URL $URL
+        echo But received the error $ERROR
+        exit -1
+    fi
+fi
+# Extract the number from the first <id>15856815</id>
+CALENDAR=$(cat ${GROUPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | sed -e 's/^.*<id>//' | sed -e 's/<\/id>.*//' | grep -v xml | grep -v item | head -n 1)
+#CALENDAR=15963838
+#CALENDAR=16193002
+#echo CALENDAR=${CALENDAR}
+GROUPNAME=$(cat ${GROUPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | sed -e 's/^.*<group_name>//' | sed -e 's/<\/group_name>.*//' | grep -v xml | grep -v item | head -n 1)
+if [[ $GROUPNAME =~ "${DOMAIN}" ]]; then
+    GROUPURL=http://www.${DOMAIN}.com
+else
+    GROUPURL=http://www.meetup.com/${GROUP}/
+fi
+
+TIME=$(cat ${GROUPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | sed -e 's/^.*<time>//' | sed -e 's/<\/time>.*//' | grep -v xml | grep -v item | head -n 1)
+
+# Unix date Thu Feb 03 08:00:00 EST 2011
+
+MONTH=$(echo $TIME | cut -d' ' -f 2 )
+DAY=$(echo $TIME | cut -d' ' -f 3 | sed -e 's/^0//' )
+
+TITLE=$(cat ${GROUPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | sed -e 's/^.*<name>//' | sed -e 's/<\/name>.*//' | grep -v xml | grep -v item | head -n 1)
+NEXTTITLE=$(cat ${GROUPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | sed -e 's/^.*<name>//' | sed -e 's/<\/name>.*//' | grep -v xml | grep -v item | head -n 2 | tail -n 1)
+FINALTITLE=$(cat ${GROUPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | sed -e 's/^.*<name>//' | sed -e 's/<\/name>.*//' | grep -v xml | grep -v item | tail -n 1)
+
+echo \<h1\>${GROUPNAME}\</h1\> >> ${OUTTMP}
+echo \<h2\>${TITLE}\</h2\> >> ${OUTTMP}
+echo \<p\>Attendees for ${MONTH} ${DAY}\</p\> >> ${OUTTMP}
+
+# Need RSVPs to get the list of attendees
+URL=https://api.meetup.com/rsvps.xml/?event_id=${CALENDAR}\&key=${APIKEY}
+RSVPFILE=${TMPDIR}/readMeetupRSVPs
+${RETRIEVE} ${RETRIEVE_OUT} ${RSVPFILE} ${RETRIEVE_ERROR} $URL
+if [[ -f ${LOGFILE} ]]; then
+    ERROR=$(/bin/grep HTTP ${LOGFILE} | grep -v 200 | /usr/bin/tr -d " ,.[A-Z][a-z]")
+    if [[ -n $ERROR ]]; then
+        echo When retrieving ${URL}
+        echo Something went wrong finding attendees $ERROR
+        exit -1
+    else
+        MEMBERS=$(cat ${RSVPFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | grep \<response\>yes\</response\> | sed -e 's/^.*<member_id>//' | sed -e 's/<\/member_id>.*//' | grep -v xml | grep -v item | sort -n | uniq)
+    
+        #echo MEMBERS=$MEMBERS
+
+        # echo Now to iterate over the members
+
+        echo \<table border=\"0\" cellspacing=\"25\" \> >> ${OUTTMP}
+        #  cellpadding="0" cellspacing="0"
+
+        for MEMBER in $MEMBERS
+        do
+            #echo DEBUG: MEMBER=$MEMBER
+            URL=https://api.meetup.com/members.xml?member_id=${MEMBER}\&key=${APIKEY}
+            MEMBERFILE=${TMPDIR}/readMeetupMember
+            ${RETRIEVE} ${RETRIEVE_OUT} ${MEMBERFILE} ${RETRIEVE_ERROR} $URL
+            ERROR=$(/bin/grep HTTP ${LOGFILE} | grep -v 200 | /usr/bin/tr -d " ,.[A-Z][a-z]")
+            if [[ -n $ERROR ]]; then
+                echo Something went wrong retrieving the member $MEMBER $ERROR
+                exit -1
+            fi
+                 
+            URL=https://api.meetup.com/2/profiles.xml?group_urlname=${GROUP}\&member_id=${MEMBER}\&key=${APIKEY}
+            PROFILEFILE=${TMPDIR}/readMeetupProfile
+            ${RETRIEVE} ${RETRIEVE_OUT} ${PROFILEFILE} ${RETRIEVE_ERROR} $URL
+            ERROR=$(/bin/grep HTTP ${LOGFILE} | grep -v 200 | /usr/bin/tr -d " ,.[A-Z][a-z]")
+            if [[ -n $ERROR ]]; then
+	        echo Something went wrong retrieving the member profile $MEMBER $ERROR
+                exit -1
+            fi
+             
+
+            NAME=$(cat ${MEMBERFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' | sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | sed -e 's/<topics>.*<\/topics>//' | sed -e 's/^.*<name>//' | sed -e 's/<\/name>.*//' | grep -v xml | grep -v item | head -n 1 )
+            IMAGE=$(cat ${PROFILEFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' | sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | sed -e 's/^.*<photo_url>//' | sed -e 's/<\/photo_url>.*//' | grep -v xml | grep -v item | head -n 1 )
+            if [[ $IMAGE == "" ]];then
+                IMAGE=$(cat ${MEMBERFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | sed -e 's/^.*<photo_url>//' | sed -e 's/<\/photo_url>.*//' | grep -v xml | grep -v item | head -n 1 )
+            fi
+
+            ANSWER=$(cat ${RSVPFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | sed -e 's/^.*<answers>//' | sed -e 's/<\/answers>.*//' | grep -v xml | grep -v item | head -n 1 )
+
+            echo \<tr\> >> ${OUTTMP}
+            echo \<td width=\"100\" height=\"120\"\> >> ${OUTTMP}
+           #  valign="top"
+            if [[ $IMAGE == "" ]];then
+                echo No Photo\<br/\> >> ${OUTTMP}
+            else
+                echo \<img align=\"left\" width=\"78\" height=\"104\" src=\"$IMAGE\"\> >> ${OUTTMP}
+            fi
+            echo \</td\> >> ${OUTTMP}
+            echo \<td\> >> ${OUTTMP}
+            echo \<h2\>$NAME\</h2\> >> ${OUTTMP}
+
+            echo \<!-- $MEMBER --\> >> ${OUTTMP}
+
+            # Bio
+            MEMBERBIO=$(cat ${MEMBERFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | grep \<bio\> | sed -e 's/^.*<bio>//' | sed -e 's/<\/bio>.*//' | grep -v xml | grep -v item)
+            if [[ $MEMBERBIO != "" ]]; then
+                echo $MEMBERBIO >> ${OUTTMP}
+                echo \<br/\> >> ${OUTTMP}
+            else
+                PROFILEBIO=$(cat ${PROFILEFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | grep \<bio\> | sed -e 's/^.*<bio>//' | sed -e 's/<\/bio>.*//' | grep -v xml | grep -v item )
+                if [[ $PROFILEBIO != "" ]]; then
+                    echo $PROFILEBIO >> ${OUTTMP}
+                    echo \<br/\> >> ${OUTTMP}
+                fi
+            fi
+
+            if [[ $ANSWER != "" ]]; then
+                echo \<br/\>${ANSWER}\<br/\>\<br/\> >> ${OUTTMP}
+            fi
+
+            SITE=$(cat ${PROFILEFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | grep \<site_url\> | sed -e 's/^.*<site_url>//' | sed -e 's/<\/site_url>.*//' | grep -v xml | grep -v item )
+            SITENAME=$(cat ${PROFILEFILE} | tr -cd '[:print:]' | sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | grep \<site_name\> |sed -e 's/^.*<site_name>//' | sed -e 's/<\/site_name>.*//' | grep -v xml | grep -v item )
+            if [[ -n $SITE ]]; then
+                if [[ -n $SITENAME ]]; then
+                    echo "$SITENAME: " >> ${OUTTMP}
+                fi
+                echo $SITE\<br/\> >> ${OUTTMP}
+            fi
+
+            LINKEDIN=$(cat ${MEMBERFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | grep \<linkedin\> | sed -e 's/^.*<linkedin>//' | sed -e 's/<\/linkedin>.*//' | sed -e 's/^.*<identifier>//' | sed -e 's/<\/identifier>.*//' | grep -v xml | grep -v item  | head -n 1)
+            if [[ -n $LINKEDIN ]]; then
+                echo $LINKEDIN\<br/\> >> ${OUTTMP}
+            fi
+
+            TWITTER=$(cat ${MEMBERFILE} | tr -cd '[:print:]' | sed -e 's/<items>/<items>\n/g' |  sed -e 's/<\/item>/<\/item>\n/g' | grep $MEMBER | grep \<twitter\> | sed -e 's/^.*<twitter>//' | sed -e 's/<\/twitter>.*//' | sed -e 's/^.*<identifier>//' | sed -e 's/<\/identifier>.*//' | grep -v xml | grep -v item | head -n 1 )
+            if [[ -n $TWITTER ]]; then
+                echo $TWITTER >> ${OUTTMP}
+            fi
+            echo \</td\> >> ${OUTTMP}
+            echo \</tr\> >> ${OUTTMP}
+         done
+         echo \</table\> >> ${OUTTMP}
+    fi
+fi
+
+if [[ $NEXTTITLE != $FINALTITLE ]]; then
+cat <<EOF >> ${OUTTMP}
+<br/>
+Next event: <br/>
+<h2>${NEXTTITLE}</h2>
+EOF
+fi
+
+cat <<EOF >> ${OUTTMP}
+<br/>
+For schedule see: ${GROUPURL} <br/>
+<br/>
+If you add an introduction to your ${GROUPNAME} group profile (${GROUP}/Members/MyProfile) on Meetup then it will appear in the list above in future weeks.
+<br/>
+If you have no group profile but add a bio to your Meetup Account (Account/Bio) on Meetup then it will appear in the list above in future weeks.
+<br/>
+<!-- We have a Facebook group with the URL http://${DOMAIN}.org/fb or you can follow us on Twitter at http://${DOMAIN}.org/twitter 
+<br/> -->
+EOF
+echo \<p\>$(date)\<p\> >> ${OUTTMP}
+echo \<\/body\> >> ${OUTTMP}
+echo \<\/html\> >> ${OUTTMP}
+
+mv ${OUTTMP} ${OUTFINAL}
+
+exit 0
